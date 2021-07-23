@@ -1,0 +1,149 @@
+#cloud-config
+hostname: devstack
+password: ubuntu
+chpasswd: { expire: False }
+ssh_pwauth: True
+
+write_files:
+- path: /etc/sysctl.d/devstack.conf
+  content: |
+    net.ipv4.ip_forward=1
+    net.ipv4.conf.default.rp_filter=0
+    net.ipv4.conf.all.rp_filter=0
+- path: /etc/sudoers.d/stack
+  content: |
+    stack ALL=(ALL) NOPASSWD: ALL
+- path: /etc/systemd/network/enp.network
+  content: |
+    # this file ensures that our enp interface is up after reboot
+    [Match]
+    Name=enp*
+- path: /etc/systemd/network/br-ex.network
+  content: |
+    # this file ensures that our br-ex interface is up after reboot
+    [Match]
+    Name=br-ex
+    [Network]
+    Address=192.168.200.254/24
+- path: /root/devstack.sh
+  permissions: '0777'
+  content: |
+    #!/bin/bash
+    # credits to the authors of https://raw.githubusercontent.com/openstack/octavia/master/devstack/contrib/new-octavia-devstack.sh
+    OPENSTACK_RELEASE="stable/wallaby"
+    # clone the devstack repository
+    git clone -b "${OPENSTACK_RELEASE}" https://github.com/openstack/devstack.git $HOME/devstack
+    # create the devstack configuration
+    cat <<EOFDEVSTACKCONFIG > $HOME/devstack/localrc
+    KEYSTONE_TOKEN_FORMAT=fernet
+    DATABASE_PASSWORD=secretdatabase
+    RABBIT_PASSWORD=secretrabbit
+    ADMIN_PASSWORD=admin
+    SERVICE_PASSWORD=secretservice
+    SERVICE_TOKEN=111222333444
+    # Enable Logging
+    LOGFILE=/opt/stack/logs/stack.sh.log
+    VERBOSE=True
+    LOG_COLOR=True
+    # Pre-requisite
+    #ENABLED_SERVICES=key,rabbit,mysql
+    # Nova
+    #ENABLED_SERVICES+=,n-api,n-obj,n-cpu,n-cond,n-sch
+    # add novnc
+    #ENABLED_SERVICES+=,n-novnc,n-api-meta
+    # Placement service needed for Nova
+    #ENABLED_SERVICES+=,placement-api,placement-client
+    # enable Glance
+    #ENABLED_SERVICES+=,g-api,g-reg
+    # enable Neutron
+    #ENABLED_SERVICES+=,neutron-api,neutron-agent,neutron-dhcp,neutron-l3
+    #ENABLED_SERVICES+=,neutron-metadata-agent,neutron-qos
+    # enable Octavia
+    #ENABLED_SERVICES+=,octavia,o-api,o-cw,o-hm,o-hk,o-da
+    # enable Horizon
+    #ENABLED_SERVICES+=,horizon
+    # enable Cinder
+    #ENABLED_SERVICES+=,c-sch,c-api,c-vol
+    VOLUME_BACKING_FILE_SIZE=950G
+    PUBLIC_INTERFACE="enp2s0"y
+    LIBVIRT_TYPE=kvm
+    #CINDER_ENABLED_BACKENDS=nfs:nfs-1
+    #CINDER_NFS_SERVERPATH="$(netplan ip leases ens3 | grep '^ADDRESS' | sed 's/^ADDRESS=//'):/srv"
+    EOFDEVSTACKCONFIG
+    # Install the octavia client
+    #pip install python-octaviaclient
+    # Create the stack user
+    $HOME/devstack/tools/create-stack-user.sh
+    # Move everything into place
+    mv $HOME/devstack /opt/stack/
+    chown -R stack:stack /opt/stack/devstack/
+    # Fix permissions on current tty so screens can attach
+    chmod go+rw `tty`
+    # Stack that stack!
+    su - stack -c /opt/stack/devstack/stack.sh
+    # Add environment variables for auth/endpoints
+    echo 'source /opt/stack/devstack/openrc admin admin' >> /opt/stack/.bashrc
+    # setup bridge
+    ovs-vsctl add-br br-ex || true
+    ovs-vsctl add-port br-ex enp2s0 || true
+    # set 192.168.200.254 as ip address because .1 is used for nat
+    ip addr del 192.168.200.1/24 dev br-ex
+    systemctl restart systemd-networkd
+    # wait for api's to be up
+    timeout 300 curl http://127.0.0.1/
+    timeout 300 curl http://127.0.0.1:9696/
+    sleep 30
+    # cleanup resources created by devstack
+    . /opt/stack/devstack/openrc demo
+    neutron router-gateway-clear router1
+    neutron router-interface-delete router1 ipv6-private-subnet
+    neutron router-interface-delete router1 private-subnet
+    openstack router delete router1
+    openstack subnet delete ipv6-private-subnet
+    # Cleanup and setup OpenStack networks in admin project
+    . /opt/stack/devstack/openrc admin
+    openstack subnet delete private-subnet
+    openstack network delete private
+    openstack subnet delete public-subnet
+    openstack subnet delete ipv6-public-subnet
+    openstack subnet create --subnet-range 192.168.200.0/24 --allocation-pool start=192.168.200.100,end=192.168.200.199 --gateway=192.168.200.1 --network public public-subnet --dns-nameserver 192.168.200.1
+    source /opt/stack/devstack/openrc admin
+    #MGMT_PORT_MAC=$(openstack port show octavia-health-manager-standalone-listen-port -f value -c mac_address)
+    #cat <<EOFOCTAVIARECOVER > /usr/local/bin/recover-octavia.sh
+    #!/bin/bash
+    #MGMT_PORT_MAC=${MGMT_PORT_MAC}
+    #MGMT_PORT_IP=$(cat /etc/octavia/octavia.conf | grep '^bind_ip' | awk '{print $3}')
+    #OCTAVIA_HM_LISTEN_PORT=$(cat /etc/octavia/octavia.conf | grep '^bind_port' | awk '{print $3}')
+    #OCTAVIA_AMP_LOG_ADMIN_PORT=$(cat /etc/octavia/octavia.conf | grep '^admin_log_targets' | awk '{print $3}' | cut -d: -f2)
+    #OCTAVIA_AMP_LOG_TENANT_PORT=$(cat /etc/octavia/octavia.conf | grep '^tenant_log_targets' | awk '{print $3}' | cut -d: -f2)
+    #mkdir -m 700 -p /var/run/octavia
+    #chown stack /var/run/octavia/
+    #ip link set up o-hm0
+    #ip link set dev o-hm0 address $MGMT_PORT_MAC
+    #ip addr add "$MGMT_PORT_IP/24" dev o-hm0
+    #iptables -I INPUT -i o-hm0 -p udp --dport \$OCTAVIA_HM_LISTEN_PORT -j ACCEPT
+    #iptables -I INPUT -i o-hm0 -p udp --dport \$OCTAVIA_AMP_LOG_ADMIN_PORT -j ACCEPT
+    #iptables -I INPUT -i o-hm0 -p udp --dport \$OCTAVIA_AMP_LOG_TENANT_PORT -j ACCEPT
+    #EOFOCTAVIARECOVER
+    #chmod +x /usr/local/bin/recover-octavia.sh
+    cat <<EOFOCTAVIARECOVER > /etc/systemd/system/octavia-recover.service
+    [Unit]
+    Description=Recover octavia
+    Wants=network-online.target
+    After=network-online.target
+    RequiredBy=devstack@o-cw.service devstack@o-da.service devstack@o-hk.service devstack@o-hm.service
+    [Service]
+    Type=oneshot
+    RemainAfterExit=true
+    ExecStart=/usr/local/bin/recover-octavia.sh
+    [Install]
+    WantedBy=multi-user.target
+    EOFOCTAVIARECOVER
+    systemctl daemon-reload
+    systemctl enable octavia-recover
+runcmd:
+  - apt-get update
+  - apt-get install -y git-core vim jq
+  - sysctl -p /etc/sysctl.d/devstack.conf
+  - /root/devstack.sh
+final_message: "The system is finally up, after $UPTIME seconds"

@@ -1,0 +1,12 @@
+<network>
+  <name>devstack-public</name>
+  <uuid>77c0b241-7d94-429d-9056-3c78e288165e</uuid>
+  <forward dev="%INTERFACE%" mode="route">
+    <interface dev="%INTERFACE%"/>
+  </forward>
+  <bridge name="virbr-devstack" stp="on" delay="0"/>
+  <mac address="52:54:00:81:8d:64"/>
+  <domain name="devstack-pub1"/>
+  <ip address="192.168.200.1" netmask="255.255.255.0">
+  </ip>
+</network>
